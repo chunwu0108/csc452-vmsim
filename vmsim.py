@@ -7,7 +7,6 @@ class Page:
     def __init__(self, addr, dirty):
         self.addr = addr
         self.dirty = dirty
-
     def __eq__(self, addr):
         return self.addr == addr
 
@@ -19,12 +18,70 @@ class Page_v2(Page):
 
 class Clock:
     def __init__(self, size):
-        pass
-    def add(self):
-        pass
-    def reset_ref(self):
-        pass
+        self.head = Page_v2("", False)
+        temp = self.head
+        for i in range(size-1):
+            temp.next = Page_v2("", False)
+            temp = temp.next
+        temp.next = self.head
 
+    def add(self, addr, op):
+
+        global page_fault
+
+        # if the clock has the address
+        if self.head.addr == addr:
+            if op == 'w':
+                    self.head.dirty = True
+            self.head.ref = True
+            return
+
+        temp = self.head.next
+        while(temp != self.head):
+            if temp.addr == addr:
+                if op == 'w':
+                    temp.dirty = True
+                temp.ref = True
+                self.head = temp
+                return
+            temp = temp.next
+        # when the address is not found in the clock
+        # evict a frame
+        page_fault += 1
+        
+        # if the head is not referenced
+        if not self.head.ref:
+            self.__evict_page(self.head, addr, op)
+            return
+        self.head.ref = False
+
+        # check the first non-referenced page after head
+        temp = self.head.next
+        while(temp != self.head):
+            if not temp.ref:
+                self.__evict_page(temp, addr, op)
+                return
+            temp.ref = False
+            temp = temp.next
+
+    def __evict_page(self, page, addr, op):
+
+        global write_disk
+
+        if page.addr == "":
+            self.head = self.head.next
+
+        if page.dirty:
+            write_disk += 1
+        if op == 'w':
+            page.dirty = True
+        else:
+            page.dirty = False
+        page.ref = False
+        page.addr = addr
+        
+        return
+            
 
 page_fault = 0
 mem_access = 0
@@ -84,6 +141,11 @@ def access_mem(frame, addr, alg_add, op="r"):
 
     dirty = False
     mem_access += 1
+
+    # for clock alg only
+    if type(frame) == Clock:
+        frame.add(addr, op)
+        return
 
     # Check to see if the page is in the frame
     # return the page obj if found, else return None
@@ -164,7 +226,17 @@ def opt(file):
 
 
 def clock(file):
-    pass
+
+    global frame_size
+
+    f_in = open(file, 'r')
+    frame = Clock(frame_size)
+
+    for line in f_in:
+        line_dissect(line, frame, access_mem, None)
+
+    print_summary("Clock")
+    f_in.close()
 
 
 def main():
@@ -177,11 +249,6 @@ def main():
         '-a', required=True, help='An algorithm to use for page replacement')
     parser.add_argument('tracename', help='A file name to trace')
     args = parser.parse_args()
-
-    # Debug
-    print("number of frames:", args.n)
-    print("alg used:", args.a)
-    print("filename:", args.tracename)
 
     # if the input algorithm isn't one of the following
     if not args.a.lower() in ['opt', 'clock', 'fifo', 'rand']:
@@ -197,6 +264,8 @@ def main():
     elif args.a == "rand":
         rand.seed(time.time())
         random(args.tracename)
+    elif args.a == "clock":
+        clock(args.tracename)
 
 
 if __name__ == "__main__":
