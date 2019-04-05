@@ -4,24 +4,25 @@ import time
 
 
 class Page:
-    def __init__(self, addr, dirty):
-        self.addr = addr
+    def __init__(self, dirty):
         self.dirty = dirty
-    def __eq__(self, addr):
-        return self.addr == addr
+        self.valid = False
 
-class Page_v2(Page):
-    def __init__(self, addr, dirty):
-        Page.__init__(self, addr, dirty)
+
+class Node:
+    def __init__(self, addr):
+        self.addr = addr
         self.next = None
         self.ref = False
 
+
 class Clock:
-    def __init__(self, size):
-        self.head = Page_v2("", False)
+    def __init__(self, size, page_table):
+        self.head = Node(None)
+        self.page_table = page_table
         temp = self.head
-        for i in range(size-1):
-            temp.next = Page_v2("", False)
+        for i in range(size - 1):
+            temp.next = Node(None)
             temp = temp.next
         temp.next = self.head
 
@@ -29,59 +30,63 @@ class Clock:
 
         global page_fault
 
+        hex_int = int("0x" + addr, 16)
+        addr_22 = hex_int // (2**12)
+
+        page_table = self.page_table
+
         # if the clock has the address
-        if self.head.addr == addr:
+        if page_table[addr_22].valid:
             if op == 'w':
-                    self.head.dirty = True
-            self.head.ref = True
+                page_table[addr_22].dirty = True
+            page_table[addr_22].ref = True
             return
 
-        temp = self.head.next
-        while(temp != self.head):
-            if temp.addr == addr:
-                if op == 'w':
-                    temp.dirty = True
-                temp.ref = True
-                self.head = temp
-                return
-            temp = temp.next
         # when the address is not found in the clock
         # evict a frame
         page_fault += 1
-        
+
         # if the head is not referenced
-        if not self.head.ref:
-            self.__evict_page(self.head, addr, op)
+        if (self.head.addr == None) or (not self.head.ref):
+            self.__evict_page(self.head, addr_22, op)
             return
-        self.head.ref = False
+        else:
+            page_table[self.head.addr].ref = False
 
         # check the first non-referenced page after head
         temp = self.head.next
-        while(temp != self.head):
-            if not temp.ref:
-                self.__evict_page(temp, addr, op)
+        while (temp != self.head):
+            if (temp.addr == None) or (not temp.ref):
+                self.__evict_page(temp, addr_22, op)
                 return
-            temp.ref = False
+            page_table[temp.addr].ref = False
             temp = temp.next
 
-    def __evict_page(self, page, addr, op):
+    def __evict_page(self, node, addr, op):
 
         global write_disk
 
-        if page.addr == "":
-            self.head = self.head.next
+        if node.addr != None:
+            old_page = self.page_table[node.addr]
+            if old_page.dirty:
+                write_disk += 1
+            old_page.dirty = False
+            old_page.valid = False
 
-        if page.dirty:
-            write_disk += 1
+        new_page = self.page_table[addr]
+
         if op == 'w':
-            page.dirty = True
+            new_page.dirty = True
         else:
-            page.dirty = False
-        page.ref = False
-        page.addr = addr
-        
+            new_page.dirty = False
+        new_page.valid = True
+
+        node.ref = False
+        node.addr = addr
+        self.head = node
+
         return
-            
+
 
 page_fault = 0
 mem_access = 0
@@ -103,7 +108,7 @@ def print_summary(alg):
     print("Total writes to disk:   " + str(write_disk).rjust(10))
 
 
-def line_dissect(line, frame, alg_mem_access, alg_add):
+def line_dissect(line, page_table, frame, alg_mem_access, alg_add):
 
     # Skip header
     if line[0] in "-=":
@@ -113,26 +118,25 @@ def line_dissect(line, frame, alg_mem_access, alg_add):
     addr = line[3:].split(',')[0]
 
     if instr == 'I':  # READ
-        alg_mem_access(frame, addr, alg_add, op='r')
+        alg_mem_access(page_table, frame, addr, alg_add, op='r')
     elif instr == 'L':  # LOAD (READ)
-        alg_mem_access(frame, addr, alg_add, op='r')
+        alg_mem_access(page_table, frame, addr, alg_add, op='r')
     elif instr == 'S':  # STORE (WRITE)
-        alg_mem_access(frame, addr, alg_add, op='w')
+        alg_mem_access(page_table, frame, addr, alg_add, op='w')
     elif instr == 'M':  # MODIFY (READ & WRITE)
-        alg_mem_access(frame, addr, alg_add, op='r')
-        alg_mem_access(frame, addr, alg_add, op='w')
+        alg_mem_access(page_table, frame, addr, alg_add, op='r')
+        alg_mem_access(page_table, frame, addr, alg_add, op='w')
     else:
         print("invalid instruction")
 
 
-def frame_has(frame, addr):
-    for x in frame:
-        if x == addr:
-            return x
+def page_table_has(table, addr):
+    if table[addr].valid:
+        return table[addr]
     return None
 
 
-def access_mem(frame, addr, alg_add, op="r"):
+def access_mem(page_table, frame, addr, alg_add, op="r"):
 
     global page_fault
     global mem_access
@@ -149,7 +153,9 @@ def access_mem(frame, addr, alg_add, op="r"):
 
     # Check to see if the page is in the frame
     # return the page obj if found, else return None
-    page = frame_has(frame, addr)
+    hex_int = int("0x" + addr, 16)
+    addr_22 = hex_int // (2**12)
+    page = page_table_has(page_table, addr_22)
 
     # found in RAM
     if page != None:
@@ -161,38 +167,50 @@ def access_mem(frame, addr, alg_add, op="r"):
         page_fault += 1
         if op == 'w':
             dirty = True
-        write_disk += alg_add(frame, addr, dirty)
+        write_disk += alg_add(page_table, frame, addr, dirty)
 
 
-def fifo_add_alg(frame, addr, dirty):
+def fifo_add_alg(page_table, frame, addr, dirty):
 
     global frame_size
-    p = Page(addr, dirty)
+
+    hex_int = int("0x" + addr, 16)
+    addr_22 = hex_int // (2**12)
+
+    page_table[addr_22].valid = True
     write = 0  # write to the disk count
 
     # if the frame is full
     if len(frame) >= frame_size:
-        if frame[0].dirty:
+        if page_table[frame[0]].dirty:
             write += 1
+        page_table[frame[0]].valid = False
+        page_table[frame[0]].dirty = False
         del frame[0]
-    frame.append(p)
+    frame.append(addr_22)
 
     return write
 
 
-def rand_add_alg(frame, addr, dirty):
+def rand_add_alg(page_table, frame, addr, dirty):
 
     global frame_size
-    p = Page(addr, dirty)
+
+    hex_int = int("0x" + addr, 16)
+    addr_22 = hex_int // (2**12)
+
+    page_table[addr_22].valid = True
     write = 0  # write to the disk count
 
     r = rand.randint(0, frame_size - 1)
     # if the frame is full
     if len(frame) >= frame_size:
-        if frame[r].dirty:
+        if page_table[frame[r]].dirty:
             write += 1
+        page_table[frame[r]].valid = False
+        page_table[frame[r]].dirty = False
         del frame[r]
-    frame.append(p)
+    frame.append(addr_22)
 
     return write
 
@@ -200,10 +218,13 @@ def rand_add_alg(frame, addr, dirty):
 def fifo(file):
 
     f_in = open(file, 'r')
-    frame = []
+    page_table = []
+    for i in range(2**32 // 2**12):
+        page_table.append(Page(False))
 
+    frame = []
     for line in f_in:
-        line_dissect(line, frame, access_mem, fifo_add_alg)
+        line_dissect(line, page_table, frame, access_mem, fifo_add_alg)
 
     print_summary("FIFO")
     f_in.close()
@@ -212,10 +233,13 @@ def fifo(file):
 def random(file):
 
     f_in = open(file, 'r')
-    frame = []
+    page_table = []
+    for i in range(2**32 // 2**12):
+        page_table.append(Page(False))
 
+    frame = []
     for line in f_in:
-        line_dissect(line, frame, access_mem, rand_add_alg)
+        line_dissect(line, page_table, frame, access_mem, rand_add_alg)
 
     print_summary("Random")
     f_in.close()
@@ -230,10 +254,15 @@ def clock(file):
     global frame_size
 
     f_in = open(file, 'r')
-    frame = Clock(frame_size)
+
+    page_table = []
+    for i in range(2**32 // 2**12):
+        page_table.append(Page(False))
+
+    frame = Clock(frame_size, page_table)
 
     for line in f_in:
-        line_dissect(line, frame, access_mem, None)
+        line_dissect(line, page_table, frame, access_mem, None)
 
     print_summary("Clock")
     f_in.close()
